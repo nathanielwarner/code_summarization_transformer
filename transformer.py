@@ -235,6 +235,7 @@ class Encoder(tf.keras.layers.Layer):
 
         self.dropout = tf.keras.layers.Dropout(rate)
 
+    @tf.function
     def call(self, x, training, mask):
         seq_len = tf.shape(x)[1]
 
@@ -278,6 +279,7 @@ class Decoder(tf.keras.layers.Layer):
                                for _ in range(num_layers)]
         self.dropout = tf.keras.layers.Dropout(rate)
 
+    @tf.function
     def call(self, x, enc_output, training,
              look_ahead_mask, padding_mask):
         seq_len = tf.shape(x)[1]
@@ -602,18 +604,18 @@ class Transformer(tf.keras.Model):
         enc_padding_mask = create_padding_mask(encoder_inputs)
         enc_outputs = self.encoder(encoder_inputs, False, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
 
-        tar = tf.repeat(tf.expand_dims(tf.expand_dims(self.output_tokenizer.start_token, 0), 0), num_examples, axis=0)
+        tar = np.zeros((num_examples, self.max_output_len), dtype='int32')
+        tar[:, 0] = self.output_tokenizer.start_token
 
-        for step in range(self.max_output_len):
+        for step in range(1, self.max_output_len):
             _, combined_mask, dec_padding_mask = create_masks(encoder_inputs, tar)
             # dec_output.shape == (batch_size, tar_seq_len, d_model)
             dec_output, attention_weights = self.decoder(tar, enc_outputs, False, combined_mask,
                                                          dec_padding_mask)
             final_output = self.final_layer(dec_output)
 
-            new_preds = tf.argmax(final_output[:, -1, :], axis=-1, output_type=tf.int32)
-            exp_new_preds = tf.expand_dims(new_preds, -1)
-            tar = tf.concat((tar, exp_new_preds), -1)
+            new_preds = tf.argmax(final_output[:, step - 1, :], axis=-1, output_type=tf.int32).numpy()
+            tar[:, step] = new_preds
 
         de_tokenized = map(self.output_tokenizer.de_tokenize_text, tar)
         final = map(tdu.de_eof_text, de_tokenized)

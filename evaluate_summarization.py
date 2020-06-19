@@ -29,9 +29,10 @@ predicts = []
 meteors = []
 for batch_num in tqdm.trange(num_batches):
     codes_batch = codes[batch_num * batch_size: batch_num * batch_size + batch_size]
+    size_of_batch = len(codes_batch)
     predicts_batch = transformer.translate_batch(codes_batch, preprocessed=True)
     predicts.extend(predicts_batch)
-    for i in range(batch_num * batch_size, batch_num * batch_size + batch_size):
+    for i in range(batch_num * batch_size, batch_num * batch_size + size_of_batch):
         print("%d of %d" % (i, len_dataset))
         print("Code: %s" % codes[i])
         print("True Summaries: %s" % true_summaries[i])
