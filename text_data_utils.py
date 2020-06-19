@@ -104,6 +104,6 @@ def eof_text(text: str) -> str:
 def de_eof_text(text: str) -> str:
     if text.startswith("<s>"):
         text = text[len("<s>"):]
-    if text.endswith("</s>"):
-        text = text[:-len("</s>")]
+    if "</s>" in text:
+        text = text[:text.index("</s>")]
     return text
