@@ -1,28 +1,4 @@
-import random
 import tensorflow as tf
-
-
-def dataset_to_batched_tensors(dataset, batch_size, tar_dim, inp_dim):
-    batch_cutoffs = range(0, len(dataset), batch_size)
-    num_batches = len(batch_cutoffs) - 1
-
-    random.seed()
-    random.shuffle(dataset)
-
-    def generator():
-        for i in range(num_batches):
-            batch = dataset[batch_cutoffs[i]: batch_cutoffs[i + 1]]
-            tar = [ex[0] for ex in batch]
-            inp = [ex[1] for ex in batch]
-            summaries = tf.keras.preprocessing.sequence.pad_sequences(tar, maxlen=tar_dim, padding='post',
-                                                                      truncating='post', dtype='int32')
-            codes = tf.keras.preprocessing.sequence.pad_sequences(inp, maxlen=inp_dim, padding='post',
-                                                                  truncating='post', dtype='int32')
-            summaries = tf.convert_to_tensor(summaries)
-            codes = tf.convert_to_tensor(codes)
-            yield summaries, codes
-
-    return generator(), num_batches
 
 
 def beam_search_decode(initial_state, single_bsd_step, start_token, end_token, beam_width=10, max_len=50):

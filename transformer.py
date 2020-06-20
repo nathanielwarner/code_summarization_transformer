@@ -7,10 +7,11 @@ import json
 import tqdm
 import os
 import argparse
+import random
 
 import text_data_utils as tdu
 from tokenizer import Tokenizer
-from tf_utils import beam_search_decode, dataset_to_batched_tensors
+from tf_utils import beam_search_decode
 
 
 # These functions and classes were originally created from the TensorFlow Transformer tutorial
@@ -395,6 +396,33 @@ class Transformer(tf.keras.Model):
 
         return final_output, attention_weights
 
+    def dataset_to_batched_tensors(self, dataset, batch_size):
+        batch_cutoffs = range(0, len(dataset), batch_size)
+        num_batches = len(batch_cutoffs) - 1
+
+        random.seed()
+        random.shuffle(dataset)
+
+        in_len = self.max_input_len
+        out_len = self.max_output_len
+        in_tok = self.input_tokenizer.tokenize_text
+        out_tok = self.output_tokenizer.tokenize_text
+
+        def generator():
+            for i in range(num_batches):
+                batch = dataset[batch_cutoffs[i]: batch_cutoffs[i + 1]]
+                codes = [in_tok(ex[0]) for ex in batch]
+                summaries = [out_tok(ex[1]) for ex in batch]
+                codes = tf.keras.preprocessing.sequence.pad_sequences(codes, maxlen=in_len, padding='post',
+                                                                      truncating='post', dtype='int32')
+                summaries = tf.keras.preprocessing.sequence.pad_sequences(summaries, maxlen=out_len, padding='post',
+                                                                          truncating='post', dtype='int32')
+                codes = tf.convert_to_tensor(codes)
+                summaries = tf.convert_to_tensor(summaries)
+                yield codes, summaries
+
+        return generator(), num_batches
+
     @tf.function
     def train_step(self, inp, tar_inp, tar_out):
 
@@ -415,11 +443,11 @@ class Transformer(tf.keras.Model):
         self.train_accuracy(tar_out, predictions)
 
     def val_loss(self, dataset, batch_size=64):
-        dataset, num_batches = dataset_to_batched_tensors(dataset, batch_size, self.max_output_len, self.max_input_len)
+        dataset, num_batches = self.dataset_to_batched_tensors(dataset, batch_size)
         loss = 0.0
         batch_nums = tqdm.trange(num_batches)
         for i in batch_nums:
-            tar, inp = next(dataset)
+            inp, tar = next(dataset)
             tar_inp = tar[:, :-1]
             tar_out = tar[:, 1:]
             enc_padding_mask, combined_mask, dec_padding_mask = create_masks(inp, tar_inp)
@@ -442,16 +470,6 @@ class Transformer(tf.keras.Model):
             train_set = [(self.tar_prep(s), self.inp_prep(c)) for s, c in train_set]
             val_set = [(self.tar_prep(s), self.inp_prep(c)) for s, c in val_set]
 
-        print("Tokenizing datasets...")
-        train_set = [(self.output_tokenizer.tokenize_text(s), self.input_tokenizer.tokenize_text(c))
-                     for s, c in train_set]
-        val_set = [(self.output_tokenizer.tokenize_text(s), self.input_tokenizer.tokenize_text(c))
-                   for s, c in val_set]
-
-        print("Removing examples that are too long...")
-        train_set = [(s, c) for s, c in train_set if len(s) <= self.max_output_len and len(c) <= self.max_input_len]
-        val_set = [(s, c) for s, c in val_set if len(s) <= self.max_output_len and len(c) <= self.max_input_len]
-
         print("Training on %d examples, validating on %d examples" % (len(train_set), len(val_set)))
 
         best_val_loss = self.val_loss(val_set, batch_size=batch_size)
@@ -464,11 +482,10 @@ class Transformer(tf.keras.Model):
             self.train_loss.reset_states()
             self.train_accuracy.reset_states()
 
-            train_batches, num_batches = dataset_to_batched_tensors(train_set, batch_size,
-                                                                    self.max_output_len, self.max_input_len)
+            train_batches, num_batches = self.dataset_to_batched_tensors(train_set, batch_size)
             batch_nums = tqdm.trange(num_batches)
             for batch_num in batch_nums:
-                tar, inp = next(train_batches)
+                inp, tar = next(train_batches)
                 tar_inp = tar[:, :-1]
                 tar_out = tar[:, 1:]
                 self.train_step(inp, tar_inp, tar_out)

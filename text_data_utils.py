@@ -77,9 +77,9 @@ def json_java_dataset_as_generator(filename):
                 file.seek(0)
                 break
             json_row = json.loads(row)
-            summary = preprocess_javadoc(json_row["nl"])
             code = preprocess_java(json_row["code"])
-            yield summary, code
+            summary = preprocess_javadoc(json_row["nl"])
+            yield code, summary
 
     return generator
 
