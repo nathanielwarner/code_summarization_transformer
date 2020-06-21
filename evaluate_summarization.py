@@ -26,8 +26,8 @@ transformer = Transformer(model_path)
 
 dataset = tdu.load_json_dataset(eval_set_path)
 len_dataset = len(dataset)
-codes = [ex[1] for ex in dataset]
-true_summaries = [[ex[0]] for ex in dataset]
+codes = [ex[0] for ex in dataset]
+true_summaries = [[ex[1]] for ex in dataset]
 
 num_batches = int((len(codes) / batch_size) + 1)
 predicts = []
