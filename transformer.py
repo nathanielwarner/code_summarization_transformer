@@ -1,17 +1,59 @@
 import tensorflow as tf
+import sentencepiece as spm
 
 import time
 import numpy as np
 import matplotlib.pyplot as plt
 import json
-import tqdm
 import os
 import argparse
-import random
+import sys
 
-import text_data_utils as tdu
-from tokenizer import Tokenizer
-from tf_utils import beam_search_decode
+from data.leclair_java.process_funcom import preprocess_java, preprocess_javadoc
+
+
+def beam_search_decode(initial_state, single_bsd_step, start_token, end_token, beam_width=10, max_len=50):
+    final, initial_state = single_bsd_step(tf.expand_dims(start_token, 0), initial_state)
+    predictions = tf.argsort(final, axis=-1, direction='DESCENDING').numpy()[0:beam_width]
+    beams = []
+    for k in range(beam_width):
+        formed_candidate = ([start_token, predictions[k]],
+                            -tf.math.log(final[predictions[k]]),
+                            initial_state)
+        beams.append(formed_candidate)
+    for j in range(max_len - 1):
+        candidates = []
+        for k in range(beam_width):
+            if beams[k][0][-1] == end_token:
+                if len(candidates) < beam_width:
+                    candidates.append(beams[k])
+                else:
+                    for m in range(len(candidates)):
+                        if candidates[m][1] > beams[k][1]:
+                            candidates[m] = beams[k]
+                            break
+            else:
+                final, new_state = single_bsd_step(beams[k][0], beams[k][2])
+                predictions = tf.argsort(final, axis=-1, direction='DESCENDING').numpy()[0:beam_width]
+                for prediction in predictions:
+                    formed_candidate = (beams[k][0] + [prediction],
+                                        beams[k][1] + -tf.math.log(final[prediction]),
+                                        new_state)
+                    if len(candidates) < beam_width:
+                        candidates.append(formed_candidate)
+                    else:
+                        for m in range(len(candidates)):
+                            if candidates[m][1] > formed_candidate[1]:
+                                candidates[m] = formed_candidate
+                                break
+        beams = candidates
+        if all(beams[k][0][-1] == end_token for k in range(beam_width)):
+            break
+    lowest_perplexity_beam = beams[0]
+    for k in range(1, beam_width):
+        if beams[k][1] < lowest_perplexity_beam[1]:
+            lowest_perplexity_beam = beams[k]
+    return lowest_perplexity_beam
 
 
 # These functions and classes were originally created from the TensorFlow Transformer tutorial
@@ -310,30 +352,26 @@ class Decoder(tf.keras.layers.Layer):
 
 
 preprocessors = {
-    'java': tdu.preprocess_java,
-    'javadoc': tdu.preprocess_javadoc
+    'java': preprocess_java,
+    'javadoc': preprocess_javadoc
 }
 
 
 class Transformer(tf.keras.Model):
-    def __init__(self, model_path, train_set=None, val_set=None, num_train_epochs=0, train_batch_size=64,
-                 sets_preprocessed=False):
+    def __init__(self, model_path, input_tokenizer_path, output_tokenizer_path):
         super(Transformer, self).__init__()
 
         model_path = os.path.abspath(model_path)
         with open(os.path.join(model_path, "transformer_description.json")) as transformer_desc_json:
             transformer_description = json.load(transformer_desc_json)
 
-        self.output_tokenizer = Tokenizer(transformer_description['tar_tokenizer_type'],
-                                          os.path.join(model_path, transformer_description['tar_tokenizer_path']),
-                                          training_texts=([ex[0] for ex in train_set] if train_set is not None
-                                                          else None),
-                                          target_vocab_size=transformer_description['tar_target_vocab_size'])
-        self.input_tokenizer = Tokenizer(transformer_description['inp_tokenizer_type'],
-                                         os.path.join(model_path, transformer_description['inp_tokenizer_path']),
-                                         training_texts=([ex[1] for ex in train_set] if train_set is not None
-                                                         else None),
-                                         target_vocab_size=transformer_description['inp_target_vocab_size'])
+        self.input_tokenizer = spm.SentencePieceProcessor()
+        self.input_tokenizer.Load(model_file=input_tokenizer_path)
+        self.input_tokenizer.SetEncodeExtraOptions('bos:eos')
+
+        self.output_tokenizer = spm.SentencePieceProcessor()
+        self.output_tokenizer.Load(model_file=output_tokenizer_path)
+        self.output_tokenizer.SetEncodeExtraOptions('bos:eos')
 
         self.tar_prep = preprocessors[transformer_description['tar_type']]
         self.inp_prep = preprocessors[transformer_description['inp_type']]
@@ -352,13 +390,13 @@ class Transformer(tf.keras.Model):
         self.max_output_len = transformer_description['tar_dim']
 
         self.encoder = Encoder(num_layers, d_model, num_heads, dff,
-                               self.input_tokenizer.vocab_size, self.max_input_len, rate=dropout_rate,
+                               self.input_tokenizer.vocab_size(), self.max_input_len, rate=dropout_rate,
                                universal=universal, shared_qk=shared_qk)
         self.decoder = Decoder(num_layers, d_model, num_heads, dff,
-                               self.output_tokenizer.vocab_size, self.max_output_len, rate=dropout_rate,
+                               self.output_tokenizer.vocab_size(), self.max_output_len, rate=dropout_rate,
                                universal=universal, shared_qk=shared_qk)
 
-        self.final_layer = tf.keras.layers.Dense(self.output_tokenizer.vocab_size)
+        self.final_layer = tf.keras.layers.Dense(self.output_tokenizer.vocab_size())
 
         learning_rate = CustomSchedule(d_model)
 
@@ -380,10 +418,6 @@ class Transformer(tf.keras.Model):
             ckpt.restore(self.ckpt_manager.latest_checkpoint)
             print('Latest checkpoint restored!!')
 
-        if num_train_epochs > 0:
-            self.train(train_set, val_set, batch_size=train_batch_size, num_epochs=num_train_epochs,
-                       sets_preprocessed=sets_preprocessed)
-
     def call(self, inp, tar, training, enc_padding_mask,
              look_ahead_mask, dec_padding_mask):
         enc_output = self.encoder(inp, training, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
@@ -396,34 +430,6 @@ class Transformer(tf.keras.Model):
 
         return final_output, attention_weights
 
-    def dataset_to_batched_tensors(self, dataset, batch_size):
-        batch_cutoffs = range(0, len(dataset), batch_size)
-        num_batches = len(batch_cutoffs) - 1
-
-        random.seed()
-        random.shuffle(dataset)
-
-        in_len = self.max_input_len
-        out_len = self.max_output_len
-        in_tok = self.input_tokenizer.tokenize_text
-        out_tok = self.output_tokenizer.tokenize_text
-
-        def generator():
-            for i in range(num_batches):
-                batch = dataset[batch_cutoffs[i]: batch_cutoffs[i + 1]]
-                codes = [in_tok(ex[0]) for ex in batch]
-                summaries = [out_tok(ex[1]) for ex in batch]
-                codes = tf.keras.preprocessing.sequence.pad_sequences(codes, maxlen=in_len, padding='post',
-                                                                      truncating='post', dtype='int32')
-                summaries = tf.keras.preprocessing.sequence.pad_sequences(summaries, maxlen=out_len, padding='post',
-                                                                          truncating='post', dtype='int32')
-                codes = tf.convert_to_tensor(codes)
-                summaries = tf.convert_to_tensor(summaries)
-                yield codes, summaries
-
-        return generator(), num_batches
-
-    @tf.function
     def train_step(self, inp, tar_inp, tar_out):
 
         enc_padding_mask, combined_mask, dec_padding_mask = create_masks(inp, tar_inp)
@@ -442,12 +448,11 @@ class Transformer(tf.keras.Model):
         self.train_loss(loss)
         self.train_accuracy(tar_out, predictions)
 
-    def val_loss(self, dataset, batch_size=64):
-        dataset, num_batches = self.dataset_to_batched_tensors(dataset, batch_size)
+    @tf.function
+    def val_loss(self, dataset):
         loss = 0.0
-        batch_nums = tqdm.trange(num_batches)
-        for i in batch_nums:
-            inp, tar = next(dataset)
+        i = 0
+        for inp, tar in dataset:
             tar_inp = tar[:, :-1]
             tar_out = tar[:, 1:]
             enc_padding_mask, combined_mask, dec_padding_mask = create_masks(inp, tar_inp)
@@ -457,22 +462,62 @@ class Transformer(tf.keras.Model):
                                        combined_mask,
                                        dec_padding_mask)
             loss += loss_function(tar_out, predictions)
-            if (i + 1) % 10 == 0:
-                current_loss = loss / (i + 1)
-                batch_nums.set_description("evaluate: loss=%.4f" % current_loss)
-        loss /= num_batches
+            i += 1
+            if i % 100 == 0:
+                current_loss = loss / tf.cast(i, tf.float32)
+                tf.print("Validation Step:", i, "\tCurrent Loss: ", current_loss, output_stream=sys.stdout)
+        loss /= tf.cast(i, tf.float32)
         return loss
 
-    def train(self, train_set, val_set, batch_size=64, num_epochs=100, sets_preprocessed=False):
+    @tf.function
+    def train_one_epoch(self, train_set):
+        i = 0
+        for inp, tar in train_set:
+            tar_inp = tar[:, :-1]
+            tar_out = tar[:, 1:]
+            self.train_step(inp, tar_inp, tar_out)
+            i += 1
+            if i % 100 == 0:
+                tf.print("Train Step:", i,
+                         "\tLoss:", self.train_loss.result(),
+                         "\tAccuracy:", self.train_accuracy.result(),
+                         output_stream=sys.stdout)
 
-        if not sets_preprocessed:
-            print("Preprocessing datasets...")
-            train_set = [(self.tar_prep(s), self.inp_prep(c)) for s, c in train_set]
-            val_set = [(self.tar_prep(s), self.inp_prep(c)) for s, c in val_set]
+    def py_tokenize(self, code, nl):
+        tok_code = self.input_tokenizer.SampleEncodeAsIds(code.numpy(), -1, 0.2)
+        tok_nl = self.output_tokenizer.SampleEncodeAsIds(nl.numpy(), -1, 0.2)
+        return tok_code, tok_nl
 
-        print("Training on %d examples, validating on %d examples" % (len(train_set), len(val_set)))
+    def parallel_tokenize(self, code, nl):
+        return tf.py_function(self.py_tokenize, [code, nl], [tf.int32, tf.int32])
 
-        best_val_loss = self.val_loss(val_set, batch_size=batch_size)
+    def filter_max_len(self, code, nl):
+        return tf.logical_and(tf.size(code) <= self.max_input_len,
+                              tf.size(nl) <= self.max_output_len)
+
+    def train(self, train_codes_path, train_nl_path, val_codes_path, val_nl_path, batch_size=64, num_epochs=100, shuffle_buffer_size=10000):
+
+        train_codes = tf.data.TextLineDataset(train_codes_path)
+        train_nl = tf.data.TextLineDataset(train_nl_path)
+        train_set = tf.data.Dataset.zip((train_codes, train_nl))
+
+        val_codes = tf.data.TextLineDataset(val_codes_path)
+        val_nl = tf.data.TextLineDataset(val_nl_path)
+        val_set = tf.data.Dataset.zip((val_codes, val_nl))
+
+        train_set = train_set.shuffle(shuffle_buffer_size, reshuffle_each_iteration=True)
+        val_set = val_set.shuffle(shuffle_buffer_size, reshuffle_each_iteration=True)
+
+        train_set = train_set.map(self.parallel_tokenize)
+        val_set = val_set.map(self.parallel_tokenize)
+
+        train_set = train_set.filter(self.filter_max_len)
+        val_set = val_set.filter(self.filter_max_len)
+
+        train_set = train_set.padded_batch(batch_size, (self.max_input_len, self.max_output_len))
+        val_set = val_set.padded_batch(batch_size, (self.max_input_len, self.max_output_len))
+
+        best_val_loss = self.val_loss(val_set)
         print('Initial Validation loss: {:.4f}'.format(best_val_loss))
         num_epochs_with_no_improvement = 0
 
@@ -482,18 +527,9 @@ class Transformer(tf.keras.Model):
             self.train_loss.reset_states()
             self.train_accuracy.reset_states()
 
-            train_batches, num_batches = self.dataset_to_batched_tensors(train_set, batch_size)
-            batch_nums = tqdm.trange(num_batches)
-            for batch_num in batch_nums:
-                inp, tar = next(train_batches)
-                tar_inp = tar[:, :-1]
-                tar_out = tar[:, 1:]
-                self.train_step(inp, tar_inp, tar_out)
-                if batch_num % 50 == 0:
-                    batch_nums.set_description("Epoch {} of {}, Loss {:.4f}, Accuracy {:.4f}".format(
-                        epoch + 1, num_epochs, self.train_loss.result(), self.train_accuracy.result()))
+            self.train_one_epoch(train_set)
 
-            val_loss = self.val_loss(val_set, batch_size=batch_size)
+            val_loss = self.val_loss(val_set)
             print('Validation loss: {:.4f}'.format(val_loss))
 
             if val_loss < best_val_loss:
@@ -529,7 +565,7 @@ class Transformer(tf.keras.Model):
 
     def evaluate_on_sentence(self, inp_sentence, max_length):
 
-        encoder_input = self.input_tokenizer.tokenize_text(inp_sentence)
+        encoder_input = self.input_tokenizer.EncodeAsIds(inp_sentence)
         if len(encoder_input) > self.max_input_len:
             print("Warning: Input sentence exceeds maximum length")
         encoder_input = tf.keras.preprocessing.sequence.pad_sequences([encoder_input], maxlen=self.max_input_len,
@@ -544,14 +580,14 @@ class Transformer(tf.keras.Model):
             "enc_output": enc_output
         }
 
-        best_beam = beam_search_decode(dec_state, self._single_bsd_step, self.output_tokenizer.start_token,
-                                       self.output_tokenizer.end_token, beam_width=1, max_len=max_length)
+        best_beam = beam_search_decode(dec_state, self._single_bsd_step, self.output_tokenizer.bos_id(),
+                                       self.output_tokenizer.eos_id(), beam_width=10, max_len=max_length)
 
         return best_beam[0], best_beam[2]["attention_weights"]
 
     def plot_attention_weights(self, attention, sentence, result):
 
-        sentence = self.input_tokenizer.tokenize_text(sentence)
+        sentence = self.input_tokenizer.EncodeAsIds(sentence)
         sentence = tf.keras.preprocessing.sequence.pad_sequences([sentence], maxlen=self.max_input_len,
                                                                  dtype='int32', padding='post', value=0,
                                                                  truncating='post')[0]
@@ -583,10 +619,10 @@ class Transformer(tf.keras.Model):
         ax.set_yticks(range(len(result_no_sos)))
 
         ax.set_xticklabels(
-            [self.input_tokenizer.de_tokenize_text([i]) for i in sentence],
+            [self.input_tokenizer.DecodeIds([i]) for i in sentence],
             fontdict=fontdict, rotation=90)
 
-        ax.set_yticklabels([self.output_tokenizer.de_tokenize_text([i]) for i in result_no_sos],
+        ax.set_yticklabels([self.output_tokenizer.DecodeIds([i]) for i in result_no_sos],
                            fontdict=fontdict)
 
         ax.set_xlabel('Encoder-Decoder Attention')
@@ -598,7 +634,7 @@ class Transformer(tf.keras.Model):
         sentence = self.inp_prep(sentence)
         result, attention_weights = self.evaluate_on_sentence(sentence, self.max_output_len)
 
-        predicted_sentence = tdu.de_eof_text(self.output_tokenizer.de_tokenize_text(result))
+        predicted_sentence = self.output_tokenizer.DecodeIds(result)
 
         if print_output:
             print('Input: {}'.format(sentence))
@@ -613,7 +649,7 @@ class Transformer(tf.keras.Model):
         num_examples = len(sentences)
         if not preprocessed:
             sentences = map(self.inp_prep, sentences)
-        encoder_inputs = list(map(self.input_tokenizer.tokenize_text, sentences))
+        encoder_inputs = list(map(self.input_tokenizer.EncodeAsIds, sentences))
         encoder_inputs = tf.keras.preprocessing.sequence.pad_sequences(encoder_inputs, maxlen=self.max_input_len,
                                                                        dtype='int32', padding='post', value=0,
                                                                        truncating='post')
@@ -622,7 +658,7 @@ class Transformer(tf.keras.Model):
         enc_outputs = self.encoder(encoder_inputs, False, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
 
         tar = np.zeros((num_examples, self.max_output_len), dtype='int32')
-        tar[:, 0] = self.output_tokenizer.start_token
+        tar[:, 0] = self.output_tokenizer.bos_id()
 
         for step in range(1, self.max_output_len):
             _, combined_mask, dec_padding_mask = create_masks(encoder_inputs, tar)
@@ -634,10 +670,8 @@ class Transformer(tf.keras.Model):
             new_preds = tf.argmax(final_output[:, step - 1, :], axis=-1, output_type=tf.int32).numpy()
             tar[:, step] = new_preds
 
-        de_tokenized = map(self.output_tokenizer.de_tokenize_text, tar)
-        final = map(tdu.de_eof_text, de_tokenized)
-
-        return final
+        de_tokenized = map(self.output_tokenizer.DecodeIds, tar)
+        return de_tokenized
 
     def interactive_demo(self):
         while True:
