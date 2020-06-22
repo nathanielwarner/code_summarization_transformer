@@ -1,5 +1,5 @@
 import tensorflow as tf
-import sentencepiece as spm
+import tensorflow_text as tft
 
 import time
 import numpy as np
@@ -7,58 +7,6 @@ import matplotlib.pyplot as plt
 import json
 import os
 import argparse
-import sys
-
-from data.leclair_java.process_funcom import preprocess_java, preprocess_javadoc
-
-
-def beam_search_decode(initial_state, single_bsd_step, start_token, end_token, beam_width=10, max_len=50):
-    final, initial_state = single_bsd_step(tf.expand_dims(start_token, 0), initial_state)
-    predictions = tf.argsort(final, axis=-1, direction='DESCENDING').numpy()[0:beam_width]
-    beams = []
-    for k in range(beam_width):
-        formed_candidate = ([start_token, predictions[k]],
-                            -tf.math.log(final[predictions[k]]),
-                            initial_state)
-        beams.append(formed_candidate)
-    for j in range(max_len - 1):
-        candidates = []
-        for k in range(beam_width):
-            if beams[k][0][-1] == end_token:
-                if len(candidates) < beam_width:
-                    candidates.append(beams[k])
-                else:
-                    for m in range(len(candidates)):
-                        if candidates[m][1] > beams[k][1]:
-                            candidates[m] = beams[k]
-                            break
-            else:
-                final, new_state = single_bsd_step(beams[k][0], beams[k][2])
-                predictions = tf.argsort(final, axis=-1, direction='DESCENDING').numpy()[0:beam_width]
-                for prediction in predictions:
-                    formed_candidate = (beams[k][0] + [prediction],
-                                        beams[k][1] + -tf.math.log(final[prediction]),
-                                        new_state)
-                    if len(candidates) < beam_width:
-                        candidates.append(formed_candidate)
-                    else:
-                        for m in range(len(candidates)):
-                            if candidates[m][1] > formed_candidate[1]:
-                                candidates[m] = formed_candidate
-                                break
-        beams = candidates
-        if all(beams[k][0][-1] == end_token for k in range(beam_width)):
-            break
-    lowest_perplexity_beam = beams[0]
-    for k in range(1, beam_width):
-        if beams[k][1] < lowest_perplexity_beam[1]:
-            lowest_perplexity_beam = beams[k]
-    return lowest_perplexity_beam
-
-
-# These functions and classes were originally created from the TensorFlow Transformer tutorial
-# It has been refactored, and given the ability to create Universal Transformers,
-# and those with shared queries and keys in the attention blocks.
 
 
 def get_angles(pos, i, d_model):
@@ -351,30 +299,37 @@ class Decoder(tf.keras.layers.Layer):
         return x, attention_weights
 
 
-preprocessors = {
-    'java': preprocess_java,
-    'javadoc': preprocess_javadoc
-}
-
-
 class Transformer(tf.keras.Model):
-    def __init__(self, model_path, input_tokenizer_path, output_tokenizer_path):
+    def __init__(self, model_path, input_tokenizer_path, output_tokenizer_path, training=False):
         super(Transformer, self).__init__()
 
         model_path = os.path.abspath(model_path)
         with open(os.path.join(model_path, "transformer_description.json")) as transformer_desc_json:
             transformer_description = json.load(transformer_desc_json)
 
-        self.input_tokenizer = spm.SentencePieceProcessor()
-        self.input_tokenizer.Load(model_file=input_tokenizer_path)
-        self.input_tokenizer.SetEncodeExtraOptions('bos:eos')
+        if training:
+            nbest_size = -1
+            alpha = 0.2
+        else:
+            nbest_size = 0
+            alpha = 1.0
+        self.training = training
 
-        self.output_tokenizer = spm.SentencePieceProcessor()
-        self.output_tokenizer.Load(model_file=output_tokenizer_path)
-        self.output_tokenizer.SetEncodeExtraOptions('bos:eos')
+        in_spm = open(input_tokenizer_path, 'rb').read()
+        self.input_tokenizer = tft.SentencepieceTokenizer(model=in_spm, out_type=tf.int32, nbest_size=nbest_size, alpha=alpha,
+                                                          reverse=False, add_bos=True, add_eos=True)
 
-        self.tar_prep = preprocessors[transformer_description['tar_type']]
-        self.inp_prep = preprocessors[transformer_description['inp_type']]
+        out_spm = open(output_tokenizer_path, 'rb').read()
+        self.output_tokenizer = tft.SentencepieceTokenizer(model=out_spm, out_type=tf.int32, nbest_size=nbest_size, alpha=alpha,
+                                                           reverse=False, add_bos=True, add_eos=True)
+        
+        in_tok_empty = self.input_tokenizer.tokenize('')
+        self.in_tok_bos = in_tok_empty[0]
+        self.in_tok_eos = in_tok_empty[1]
+
+        out_tok_empty = self.output_tokenizer.tokenize('')
+        self.out_tok_bos = out_tok_empty[0]
+        self.out_tok_eos = out_tok_empty[1]
 
         num_layers = transformer_description['num_layers']
         d_model = transformer_description['d_model']
@@ -417,6 +372,9 @@ class Transformer(tf.keras.Model):
         if self.ckpt_manager.latest_checkpoint:
             ckpt.restore(self.ckpt_manager.latest_checkpoint)
             print('Latest checkpoint restored!!')
+            self.restored = True
+        else:
+            self.restored = False
 
     def call(self, inp, tar, training, enc_padding_mask,
              look_ahead_mask, dec_padding_mask):
@@ -465,7 +423,7 @@ class Transformer(tf.keras.Model):
             i += 1
             if i % 100 == 0:
                 current_loss = loss / tf.cast(i, tf.float32)
-                tf.print("Validation Step:", i, "\tCurrent Loss: ", current_loss, output_stream=sys.stdout)
+                tf.print("Validation Step:", i, "\tCurrent Loss: ", current_loss)
         loss /= tf.cast(i, tf.float32)
         return loss
 
@@ -480,22 +438,17 @@ class Transformer(tf.keras.Model):
             if i % 100 == 0:
                 tf.print("Train Step:", i,
                          "\tLoss:", self.train_loss.result(),
-                         "\tAccuracy:", self.train_accuracy.result(),
-                         output_stream=sys.stdout)
-
-    def py_tokenize(self, code, nl):
-        tok_code = self.input_tokenizer.SampleEncodeAsIds(code.numpy(), -1, 0.2)
-        tok_nl = self.output_tokenizer.SampleEncodeAsIds(nl.numpy(), -1, 0.2)
-        return tok_code, tok_nl
+                         "\tAccuracy:", self.train_accuracy.result())
 
     def parallel_tokenize(self, code, nl):
-        return tf.py_function(self.py_tokenize, [code, nl], [tf.int32, tf.int32])
+        return self.input_tokenizer.tokenize(code), self.output_tokenizer.tokenize(nl)
 
     def filter_max_len(self, code, nl):
         return tf.logical_and(tf.size(code) <= self.max_input_len,
                               tf.size(nl) <= self.max_output_len)
 
-    def train(self, train_codes_path, train_nl_path, val_codes_path, val_nl_path, batch_size=64, num_epochs=100, shuffle_buffer_size=10000):
+    def train(self, train_codes_path, train_nl_path, val_codes_path, val_nl_path, batch_size=64, num_epochs=100,
+              shuffle_buffer_size=10000):
 
         train_codes = tf.data.TextLineDataset(train_codes_path)
         train_nl = tf.data.TextLineDataset(train_nl_path)
@@ -517,7 +470,11 @@ class Transformer(tf.keras.Model):
         train_set = train_set.padded_batch(batch_size, (self.max_input_len, self.max_output_len))
         val_set = val_set.padded_batch(batch_size, (self.max_input_len, self.max_output_len))
 
-        best_val_loss = self.val_loss(val_set)
+        if self.restored:
+            best_val_loss = self.val_loss(val_set)
+        else:
+            best_val_loss = tf.convert_to_tensor(float('inf'))
+
         print('Initial Validation loss: {:.4f}'.format(best_val_loss))
         num_epochs_with_no_improvement = 0
 
@@ -527,6 +484,7 @@ class Transformer(tf.keras.Model):
             self.train_loss.reset_states()
             self.train_accuracy.reset_states()
 
+            print("Starting epoch %d of %d" % (epoch + 1, num_epochs))
             self.train_one_epoch(train_set)
 
             val_loss = self.val_loss(val_set)
@@ -550,128 +508,66 @@ class Transformer(tf.keras.Model):
 
             print('Time taken for 1 epoch: {} secs\n'.format(time.time() - start))
 
-    def _single_bsd_step(self, predicted_so_far, state):
-        enc_input = state["enc_input"]
-        enc_output = state["enc_output"]
-        tar = tf.expand_dims(predicted_so_far, 0)
-        enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
-            enc_input, tar)
-        # dec_output.shape == (1, tar_seq_len, d_model)
-        dec_output, attention_weights = self.decoder(
-            tar, enc_output, False, combined_mask, dec_padding_mask)
-        final_output = self.final_layer(dec_output)  # (1, tar_seq_len, target_vocab_size)
-        state["attention_weights"] = attention_weights
-        return tf.nn.softmax(final_output[0][-1]), state
+    def plot_attention_weights(self, attention, inp, out):
+        
+        assert not self.training
 
-    def evaluate_on_sentence(self, inp_sentence, max_length):
+        inp_tok = self.input_tokenizer.tokenize(inp).numpy()
+        out_tok = self.output_tokenizer.tokenize(out).numpy()[1:]
 
-        encoder_input = self.input_tokenizer.EncodeAsIds(inp_sentence)
-        if len(encoder_input) > self.max_input_len:
-            print("Warning: Input sentence exceeds maximum length")
-        encoder_input = tf.keras.preprocessing.sequence.pad_sequences([encoder_input], maxlen=self.max_input_len,
-                                                                      dtype='int32', padding='post', value=0,
-                                                                      truncating='post')
-
-        enc_padding_mask = create_padding_mask(encoder_input)
-        enc_output = self.encoder(encoder_input, False, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
-
-        dec_state = {
-            "enc_input": encoder_input,
-            "enc_output": enc_output
-        }
-
-        best_beam = beam_search_decode(dec_state, self._single_bsd_step, self.output_tokenizer.bos_id(),
-                                       self.output_tokenizer.eos_id(), beam_width=10, max_len=max_length)
-
-        return best_beam[0], best_beam[2]["attention_weights"]
-
-    def plot_attention_weights(self, attention, sentence, result):
-
-        sentence = self.input_tokenizer.EncodeAsIds(sentence)
-        sentence = tf.keras.preprocessing.sequence.pad_sequences([sentence], maxlen=self.max_input_len,
-                                                                 dtype='int32', padding='post', value=0,
-                                                                 truncating='post')[0]
-        inp_mask = tf.logical_not(tf.equal(sentence, 0))
-        sentence_ragged = tf.ragged.boolean_mask(sentence, inp_mask)
-        if not tf.is_tensor(sentence_ragged):
-            sentence = sentence_ragged.to_tensor()
-        else:
-            sentence = sentence_ragged
-        result_no_sos = result[1:]
-
-        encoder_decoder_attention = tf.squeeze(tf.convert_to_tensor([att_layer[1] for att_layer in attention]), axis=1)
-
-        total_attention = tf.reduce_sum(encoder_decoder_attention[-1], axis=0)
-        zeros_mask = tf.logical_not(tf.equal(total_attention, 0))
-        total_attention_ragged = tf.ragged.boolean_mask(total_attention, zeros_mask)
-        total_attention_non_ragged = total_attention_ragged.to_tensor()
-        total_attention_softmax = tf.nn.softmax(total_attention_non_ragged, axis=-1)
+        total_attention = tf.reduce_sum(attention, axis=0)
+        total_attention_softmax = tf.nn.softmax(total_attention, axis=-1).numpy()
+        total_attention_shrunk = total_attention_softmax[:len(out_tok), :len(inp_tok)]
 
         fig = plt.figure(figsize=(6, 3), dpi=192)
         ax = fig.add_subplot(1, 1, 1)
 
         # plot the attention weights
-        ax.matshow(total_attention_softmax, cmap='viridis')
+        ax.matshow(total_attention_shrunk, cmap='viridis')
 
         fontdict = {'fontsize': 6}
 
-        ax.set_xticks(range(len(sentence)))
-        ax.set_yticks(range(len(result_no_sos)))
+        ax.set_xticks(range(len(inp_tok)))
+        ax.set_yticks(range(len(out_tok)))
 
         ax.set_xticklabels(
-            [self.input_tokenizer.DecodeIds([i]) for i in sentence],
+            [self.input_tokenizer.detokenize([i]).numpy().decode('utf-8') for i in inp_tok],
             fontdict=fontdict, rotation=90)
 
-        ax.set_yticklabels([self.output_tokenizer.DecodeIds([i]) for i in result_no_sos],
+        ax.set_yticklabels([self.output_tokenizer.detokenize([i]).numpy().decode('utf-8') for i in out_tok],
                            fontdict=fontdict)
 
         ax.set_xlabel('Encoder-Decoder Attention')
 
         plt.show()
 
-    def translate(self, sentence, plot=False, print_output=False):
-
-        sentence = self.inp_prep(sentence)
-        result, attention_weights = self.evaluate_on_sentence(sentence, self.max_output_len)
-
-        predicted_sentence = self.output_tokenizer.DecodeIds(result)
-
-        if print_output:
-            print('Input: {}'.format(sentence))
-            print('Predicted translation: {}'.format(predicted_sentence))
-
-        if plot:
-            self.plot_attention_weights(attention_weights, sentence, result)
-
-        return predicted_sentence
-
-    def translate_batch(self, sentences, preprocessed=False):
+    def translate_batch(self, sentences):
         num_examples = len(sentences)
-        if not preprocessed:
-            sentences = map(self.inp_prep, sentences)
-        encoder_inputs = list(map(self.input_tokenizer.EncodeAsIds, sentences))
-        encoder_inputs = tf.keras.preprocessing.sequence.pad_sequences(encoder_inputs, maxlen=self.max_input_len,
-                                                                       dtype='int32', padding='post', value=0,
-                                                                       truncating='post')
+
+        encoder_inputs = self.input_tokenizer.tokenize(sentences)
+        encoder_inputs = encoder_inputs.to_tensor(default_value=0, shape=(num_examples, self.max_input_len))
 
         enc_padding_mask = create_padding_mask(encoder_inputs)
         enc_outputs = self.encoder(encoder_inputs, False, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
 
         tar = np.zeros((num_examples, self.max_output_len), dtype='int32')
-        tar[:, 0] = self.output_tokenizer.bos_id()
+        tar[:, 0] = self.out_tok_bos
 
         for step in range(1, self.max_output_len):
-            _, combined_mask, dec_padding_mask = create_masks(encoder_inputs, tar)
+            tar_inp = tar[:, :-1]
+            _, combined_mask, dec_padding_mask = create_masks(encoder_inputs, tar_inp)
             # dec_output.shape == (batch_size, tar_seq_len, d_model)
-            dec_output, attention_weights = self.decoder(tar, enc_outputs, False, combined_mask,
+            dec_output, attention_weights = self.decoder(tar_inp, enc_outputs, False, combined_mask,
                                                          dec_padding_mask)
             final_output = self.final_layer(dec_output)
 
             new_preds = tf.argmax(final_output[:, step - 1, :], axis=-1, output_type=tf.int32).numpy()
             tar[:, step] = new_preds
 
-        de_tokenized = map(self.output_tokenizer.DecodeIds, tar)
-        return de_tokenized
+        ind = tf.argmax(tf.cast(tf.equal(tar, self.out_tok_eos), tf.float32), axis=1) + 1
+        tar_rag = tf.RaggedTensor.from_tensor(tar, lengths=ind)
+        de_tokenized = self.output_tokenizer.detokenize(tar_rag).numpy()
+        return de_tokenized, attention_weights
 
     def interactive_demo(self):
         while True:
@@ -679,7 +575,11 @@ class Transformer(tf.keras.Model):
             inp = input(">> ")
             if inp == "exit":
                 break
-            self.translate(inp, plot=True, print_output=True)
+            out, attn = self.translate_batch([inp])
+            out = out[0].decode('utf-8')
+            attn = attn[-1][1][0]
+            print("Predicted sentence: %s" % out)
+            self.plot_attention_weights(attn, inp, out)
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
@@ -729,10 +629,16 @@ def create_masks(inp, tar):
 def main():
     parser = argparse.ArgumentParser(description="Demonstrate the translation abilities of the Transformer")
     parser.add_argument("--model_path", help="Path to the Transformer model", required=True)
+    parser.add_argument("--dataset_path", help="Path to dataset, containing the SentencePiece"
+                                           "models.", required=True, type=str)
+
     args = vars(parser.parse_args())
     model_path = args["model_path"]
+    dataset_path = os.path.abspath(args["dataset_path"])
+    code_spm_path = os.path.join(dataset_path, "code_spm.model")
+    nl_spm_path = os.path.join(dataset_path, "nl_spm.model")
 
-    transformer = Transformer(model_path)
+    transformer = Transformer(model_path, code_spm_path, nl_spm_path)
     transformer.interactive_demo()
 
 

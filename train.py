@@ -21,5 +21,5 @@ train_nl_path = os.path.join(dataset_path, "train_nl.txt")
 val_codes_path = os.path.join(dataset_path, "val_codes.txt")
 val_nl_path = os.path.join(dataset_path, "val_nl.txt")
 
-model = Transformer(model_path, code_spm_path, nl_spm_path)
+model = Transformer(model_path, code_spm_path, nl_spm_path, training=True)
 model.train(train_codes_path, train_nl_path, val_codes_path, val_nl_path, num_epochs=num_epochs)
