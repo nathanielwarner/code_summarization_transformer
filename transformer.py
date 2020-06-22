@@ -8,6 +8,8 @@ import json
 import os
 import argparse
 
+from tf_utils import beam_search_decode
+
 
 def get_angles(pos, i, d_model):
     angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
@@ -27,7 +29,7 @@ def positional_encoding(position, d_model):
 
     pos_encoding = angle_rads[np.newaxis, ...]
 
-    return tf.cast(pos_encoding, dtype=tf.float32)
+    return tf.cast(pos_encoding, tf.float32)
 
 
 def create_padding_mask(seq):
@@ -274,7 +276,7 @@ class Decoder(tf.keras.layers.Layer):
     def call(self, x, enc_output, training,
              look_ahead_mask, padding_mask):
         seq_len = tf.shape(x)[1]
-        attention_weights = []
+        # attention_weights = []
 
         x = self.embedding(x)  # (batch_size, target_seq_len, d_model)
         x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
@@ -293,10 +295,10 @@ class Decoder(tf.keras.layers.Layer):
                 x, block1, block2 = self.dec_layers[i](x, enc_output, training,
                                                        look_ahead_mask, padding_mask)
 
-            attention_weights.append((block1, block2))
+            # attention_weights.append((block1, block2))
 
         # x.shape == (batch_size, target_seq_len, d_model)
-        return x, attention_weights
+        return x #, attention_weights
 
 
 class Transformer(tf.keras.Model):
@@ -541,7 +543,7 @@ class Transformer(tf.keras.Model):
 
         plt.show()
 
-    def translate_batch(self, sentences):
+    def translate_batch(self, sentences, beam_width=10):
         num_examples = len(sentences)
 
         encoder_inputs = self.input_tokenizer.tokenize(sentences)
@@ -550,24 +552,33 @@ class Transformer(tf.keras.Model):
         enc_padding_mask = create_padding_mask(encoder_inputs)
         enc_outputs = self.encoder(encoder_inputs, False, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
 
-        tar = np.zeros((num_examples, self.max_output_len), dtype='int32')
-        tar[:, 0] = self.out_tok_bos
+        '''enc_inp_rep = tf.reshape(tf.repeat(tf.expand_dims(encoder_inputs, 1), beam_width, axis=1), (num_examples * beam_width, -1))
+        enc_out_rep = tf.reshape(tf.repeat(tf.expand_dims(enc_outputs, 1), beam_width), (num_examples * beam_width, -1, self.decoder.d_model))
+
+        def single_bsd_step(preds):
+            _, combined_mask, dec_padding_mask = create_masks(enc_inp_rep, preds)
+            dec_output = self.decoder(preds, enc_out_rep, False, combined_mask, dec_padding_mask)
+            final = tf.nn.softmax(self.final_layer(dec_output), axis=-1)
+            return final
+        
+        tar = beam_search_decode(num_examples, single_bsd_step, self.out_tok_bos, self.out_tok_eos, beam_width=beam_width, max_len=self.max_output_len)'''
+
+        tar = tf.repeat(tf.expand_dims(tf.expand_dims(self.out_tok_bos, 0), 0), num_examples, axis=0)
 
         for step in range(1, self.max_output_len):
-            tar_inp = tar[:, :-1]
-            _, combined_mask, dec_padding_mask = create_masks(encoder_inputs, tar_inp)
+            _, combined_mask, dec_padding_mask = create_masks(encoder_inputs, tar)
             # dec_output.shape == (batch_size, tar_seq_len, d_model)
-            dec_output, attention_weights = self.decoder(tar_inp, enc_outputs, False, combined_mask,
+            dec_output = self.decoder(tar, enc_outputs, False, combined_mask,
                                                          dec_padding_mask)
             final_output = self.final_layer(dec_output)
 
-            new_preds = tf.argmax(final_output[:, step - 1, :], axis=-1, output_type=tf.int32).numpy()
-            tar[:, step] = new_preds
+            new_preds = tf.expand_dims(tf.argmax(final_output[:, -1, :], axis=-1, output_type=tf.int32), 1)
+            tar = tf.concat((tar, new_preds), 1)
 
         ind = tf.argmax(tf.cast(tf.equal(tar, self.out_tok_eos), tf.float32), axis=1) + 1
         tar_rag = tf.RaggedTensor.from_tensor(tar, lengths=ind)
         de_tokenized = self.output_tokenizer.detokenize(tar_rag).numpy()
-        return de_tokenized, attention_weights
+        return de_tokenized
 
     def interactive_demo(self):
         while True:
@@ -575,11 +586,11 @@ class Transformer(tf.keras.Model):
             inp = input(">> ")
             if inp == "exit":
                 break
-            out, attn = self.translate_batch([inp])
+            out = self.translate_batch([inp])
             out = out[0].decode('utf-8')
-            attn = attn[-1][1][0]
+            #attn = attn[-1][1][0]
             print("Predicted sentence: %s" % out)
-            self.plot_attention_weights(attn, inp, out)
+            #self.plot_attention_weights(attn, inp, out)
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
@@ -602,7 +613,7 @@ def loss_function(real, pred):
     mask = tf.math.logical_not(tf.math.equal(real, 0))
     loss_ = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')(real, pred)
 
-    mask = tf.cast(mask, dtype=loss_.dtype)
+    mask = tf.cast(mask, loss_.dtype)
     loss_ *= mask
 
     return tf.reduce_mean(loss_)
