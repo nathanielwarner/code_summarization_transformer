@@ -552,28 +552,16 @@ class Transformer(tf.keras.Model):
         enc_padding_mask = create_padding_mask(encoder_inputs)
         enc_outputs = self.encoder(encoder_inputs, False, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
 
-        '''enc_inp_rep = tf.reshape(tf.repeat(tf.expand_dims(encoder_inputs, 1), beam_width, axis=1), (num_examples * beam_width, -1))
-        enc_out_rep = tf.reshape(tf.repeat(tf.expand_dims(enc_outputs, 1), beam_width), (num_examples * beam_width, -1, self.decoder.d_model))
+        enc_inp_rep = tf.reshape(tf.repeat(tf.expand_dims(encoder_inputs, 1), beam_width, axis=1), (num_examples * beam_width, -1))
+        enc_out_rep = tf.reshape(tf.repeat(tf.expand_dims(enc_outputs, 1), beam_width, axis=1), (num_examples * beam_width, -1, self.decoder.d_model))
 
         def single_bsd_step(preds):
             _, combined_mask, dec_padding_mask = create_masks(enc_inp_rep, preds)
             dec_output = self.decoder(preds, enc_out_rep, False, combined_mask, dec_padding_mask)
-            final = tf.nn.softmax(self.final_layer(dec_output), axis=-1)
+            final = tf.nn.softmax(self.final_layer(dec_output), axis=-1)[:, -1, :]
             return final
         
-        tar = beam_search_decode(num_examples, single_bsd_step, self.out_tok_bos, self.out_tok_eos, beam_width=beam_width, max_len=self.max_output_len)'''
-
-        tar = tf.repeat(tf.expand_dims(tf.expand_dims(self.out_tok_bos, 0), 0), num_examples, axis=0)
-
-        for step in range(1, self.max_output_len):
-            _, combined_mask, dec_padding_mask = create_masks(encoder_inputs, tar)
-            # dec_output.shape == (batch_size, tar_seq_len, d_model)
-            dec_output = self.decoder(tar, enc_outputs, False, combined_mask,
-                                                         dec_padding_mask)
-            final_output = self.final_layer(dec_output)
-
-            new_preds = tf.expand_dims(tf.argmax(final_output[:, -1, :], axis=-1, output_type=tf.int32), 1)
-            tar = tf.concat((tar, new_preds), 1)
+        tar = beam_search_decode(num_examples, single_bsd_step, self.out_tok_bos, self.out_tok_eos, self.output_tokenizer.vocab_size(), beam_width=beam_width, max_len=self.max_output_len)
 
         ind = tf.argmax(tf.cast(tf.equal(tar, self.out_tok_eos), tf.float32), axis=1) + 1
         tar_rag = tf.RaggedTensor.from_tensor(tar, lengths=ind)
