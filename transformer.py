@@ -513,10 +513,10 @@ class Transformer(tf.keras.Model):
 
     def beam_search_decode(self, size_of_batch, single_bsd_step, beam_width=10):
         """
-        Beam search decoder
+        Graph-compatible beam search decoder
 
         :param size_of_batch
-        :param single_bsd_step: a function that takes in the current set of predictions, of shape (size_of_batch * beam_width, step), and returns predictions for the next token, of shape (size_of_batch * beam_width, vocab_size).
+        :param single_bsd_step: a function that takes in the current set of predictions, of shape (size_of_batch * beam_width, self.max_output_len), and returns predictions for next tokens, of shape (size_of_batch * beam_width, self.max_output_len, vocab_size).
         :param beam_width: the number of beams to keep at each step
         :return:
         """
@@ -529,8 +529,10 @@ class Transformer(tf.keras.Model):
         beam_perps = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=True, infer_shape=True)
         beam_perps = beam_perps.write(0, tf.repeat(tf.expand_dims(tf.repeat(tf.expand_dims(0.0, 0), beam_width, axis=0), 0),
                                                 size_of_batch, axis=0))
+        
+        vocab_size = self.output_tokenizer.vocab_size()
 
-        finished_beams_excl = tf.constant(False, dtype=tf.bool, shape=(size_of_batch, beam_width, self.output_tokenizer.vocab_size() - 1))
+        finished_beams_excl = tf.fill((size_of_batch, beam_width, vocab_size - 1), False)
 
         first_iteration = True
         for step in tf.range(0, limit=self.max_output_len, delta=1):
@@ -545,16 +547,16 @@ class Transformer(tf.keras.Model):
                 break
 
             flat_beam_preds = tf.reshape(cur_beam_preds, (size_of_batch * beam_width, -1))
-            flat_pred_probs = single_bsd_step(flat_beam_preds)
+            flat_beam_preds_padded = tf.pad(flat_beam_preds, tf.convert_to_tensor(((0, 0), (0, self.max_output_len - step - 1))), mode="CONSTANT", constant_values=0)
+            flat_pred_probs_pre = single_bsd_step(flat_beam_preds_padded)
+            flat_pred_probs = flat_pred_probs_pre[:, step, :]
             pred_probs = tf.reshape(flat_pred_probs, (size_of_batch, beam_width, -1))
-
-            vocab_size = self.output_tokenizer.vocab_size()
 
             expanded_old_perps = tf.repeat(tf.expand_dims(cur_beam_perps, -1), vocab_size, axis=-1)
 
             finished_beams_broadcast_with_excl = tf.concat((tf.expand_dims(already_finished_beams, 2), finished_beams_excl), 2)
             pred_perps_pre = tf.where(finished_beams_broadcast_with_excl, x=expanded_old_perps,
-                                    y=expanded_old_perps - tf.math.log(pred_probs))
+                                      y=expanded_old_perps - tf.math.log(pred_probs))
 
             finished_beams_broadcast_wo_excl = tf.repeat(tf.expand_dims(already_finished_beams, 2), vocab_size, axis=2)
             disqualified = tf.not_equal(finished_beams_broadcast_with_excl, finished_beams_broadcast_wo_excl)
@@ -581,8 +583,9 @@ class Transformer(tf.keras.Model):
         best_beam_preds = beam_preds.read(0)[:, 0, :]
         return best_beam_preds
 
+    @tf.function
     def translate_batch(self, sentences, beam_width=10):
-        num_examples = len(sentences)
+        num_examples = sentences.shape[0]
 
         encoder_inputs = self.input_tokenizer.tokenize(sentences)
         encoder_inputs = encoder_inputs.to_tensor(default_value=0, shape=(num_examples, self.max_input_len))
@@ -596,14 +599,16 @@ class Transformer(tf.keras.Model):
         def single_bsd_step(preds):
             _, combined_mask, dec_padding_mask = create_masks(enc_inp_rep, preds)
             dec_output = self.decoder(preds, enc_out_rep, False, combined_mask, dec_padding_mask)
-            final = tf.nn.softmax(self.final_layer(dec_output), axis=-1)[:, -1, :]
+            final = tf.nn.softmax(self.final_layer(dec_output), axis=-1)
             return final
         
         tar = self.beam_search_decode(num_examples, single_bsd_step, beam_width=beam_width)
+        tar.set_shape((num_examples, None))
 
         ind = tf.argmax(tf.cast(tf.equal(tar, self.out_tok_eos), tf.float32), axis=1) + 1
+        ind.set_shape((num_examples,))
         tar_rag = tf.RaggedTensor.from_tensor(tar, lengths=ind)
-        de_tokenized = self.output_tokenizer.detokenize(tar_rag).numpy()
+        de_tokenized = self.output_tokenizer.detokenize(tar_rag)
         return de_tokenized
 
     def interactive_demo(self):
@@ -612,8 +617,8 @@ class Transformer(tf.keras.Model):
             inp = input(">> ")
             if inp == "exit":
                 break
-            out = self.translate_batch([inp])
-            out = out[0].decode('utf-8')
+            out = self.translate_batch(tf.convert_to_tensor([inp], dtype=tf.string))
+            out = out[0].numpy().decode('utf-8')
             print("Predicted sentence: %s" % out)
 
 
