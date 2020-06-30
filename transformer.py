@@ -3,7 +3,6 @@ import tensorflow_text as tft
 
 import time
 import numpy as np
-import matplotlib.pyplot as plt
 import json
 import os
 import argparse
