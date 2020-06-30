@@ -8,7 +8,8 @@ import json
 import os
 import argparse
 
-from tf_utils import beam_search_decode
+
+infinity = tf.constant(np.inf)
 
 
 def get_angles(pos, i, d_model):
@@ -510,38 +511,75 @@ class Transformer(tf.keras.Model):
 
             print('Time taken for 1 epoch: {} secs\n'.format(time.time() - start))
 
-    def plot_attention_weights(self, attention, inp, out):
-        
-        assert not self.training
+    def beam_search_decode(self, size_of_batch, single_bsd_step, beam_width=10):
+        """
+        Beam search decoder
 
-        inp_tok = self.input_tokenizer.tokenize(inp).numpy()
-        out_tok = self.output_tokenizer.tokenize(out).numpy()[1:]
+        :param size_of_batch
+        :param single_bsd_step: a function that takes in the current set of predictions, of shape (size_of_batch * beam_width, step), and returns predictions for the next token, of shape (size_of_batch * beam_width, vocab_size).
+        :param beam_width: the number of beams to keep at each step
+        :return:
+        """
 
-        total_attention = tf.reduce_sum(attention, axis=0)
-        total_attention_softmax = tf.nn.softmax(total_attention, axis=-1).numpy()
-        total_attention_shrunk = total_attention_softmax[:len(out_tok), :len(inp_tok)]
+        beam_preds = tf.TensorArray(tf.int32, size=0, dynamic_size=True, clear_after_read=True, infer_shape=False)
+        beam_preds = beam_preds.write(0, tf.repeat(tf.expand_dims(tf.repeat(
+            tf.expand_dims(tf.expand_dims(self.out_tok_bos, 0), 0), beam_width, axis=0
+        ), 0), size_of_batch, axis=0))
 
-        fig = plt.figure(figsize=(6, 3), dpi=192)
-        ax = fig.add_subplot(1, 1, 1)
+        beam_perps = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=True, infer_shape=True)
+        beam_perps = beam_perps.write(0, tf.repeat(tf.expand_dims(tf.repeat(tf.expand_dims(0.0, 0), beam_width, axis=0), 0),
+                                                size_of_batch, axis=0))
 
-        # plot the attention weights
-        ax.matshow(total_attention_shrunk, cmap='viridis')
+        finished_beams_excl = tf.constant(False, dtype=tf.bool, shape=(size_of_batch, beam_width, self.output_tokenizer.vocab_size() - 1))
 
-        fontdict = {'fontsize': 6}
+        first_iteration = True
+        for step in tf.range(0, limit=self.max_output_len, delta=1):
 
-        ax.set_xticks(range(len(inp_tok)))
-        ax.set_yticks(range(len(out_tok)))
+            cur_beam_preds = beam_preds.read(0)
+            cur_beam_perps = beam_perps.read(0)
 
-        ax.set_xticklabels(
-            [self.input_tokenizer.detokenize([i]).numpy().decode('utf-8') for i in inp_tok],
-            fontdict=fontdict, rotation=90)
+            end_tokens = tf.equal(cur_beam_preds, self.out_tok_eos)
+            already_finished_beams = tf.reduce_any(end_tokens, axis=-1)
+            if tf.reduce_all(already_finished_beams):
+                beam_preds = beam_preds.write(0, cur_beam_preds)
+                break
 
-        ax.set_yticklabels([self.output_tokenizer.detokenize([i]).numpy().decode('utf-8') for i in out_tok],
-                           fontdict=fontdict)
+            flat_beam_preds = tf.reshape(cur_beam_preds, (size_of_batch * beam_width, -1))
+            flat_pred_probs = single_bsd_step(flat_beam_preds)
+            pred_probs = tf.reshape(flat_pred_probs, (size_of_batch, beam_width, -1))
 
-        ax.set_xlabel('Encoder-Decoder Attention')
+            vocab_size = self.output_tokenizer.vocab_size()
 
-        plt.show()
+            expanded_old_perps = tf.repeat(tf.expand_dims(cur_beam_perps, -1), vocab_size, axis=-1)
+
+            finished_beams_broadcast_with_excl = tf.concat((tf.expand_dims(already_finished_beams, 2), finished_beams_excl), 2)
+            pred_perps_pre = tf.where(finished_beams_broadcast_with_excl, x=expanded_old_perps,
+                                    y=expanded_old_perps - tf.math.log(pred_probs))
+
+            finished_beams_broadcast_wo_excl = tf.repeat(tf.expand_dims(already_finished_beams, 2), vocab_size, axis=2)
+            disqualified = tf.not_equal(finished_beams_broadcast_with_excl, finished_beams_broadcast_wo_excl)
+            pred_perps = tf.where(disqualified, x=infinity, y=pred_perps_pre)
+            
+            if first_iteration:
+                pred_perps = tf.expand_dims(pred_perps[:, 0, :], 1)
+
+            new_beam_width = tf.shape(pred_perps)[1]
+
+            flattened_pred_perps = tf.reshape(pred_perps, (size_of_batch, new_beam_width * vocab_size))
+            values, indices = tf.math.top_k(-flattened_pred_perps, k=beam_width, sorted=True)
+            
+            true_perps = -values
+            beam_perps = beam_perps.write(0, true_perps)
+            first_iteration = False
+
+            beam_indices = tf.math.floordiv(indices, vocab_size)
+            chosen_beam_preds = tf.gather(cur_beam_preds, beam_indices, axis=1, batch_dims=1)
+            token_indices = tf.expand_dims(indices - beam_indices * vocab_size, 2)
+            new_full_beam_preds = tf.concat((chosen_beam_preds, token_indices), -1)
+            beam_preds = beam_preds.write(0, new_full_beam_preds)
+
+        best_beam_preds = beam_preds.read(0)[:, 0, :]
+        return best_beam_preds
 
     def translate_batch(self, sentences, beam_width=10):
         num_examples = len(sentences)
@@ -561,7 +599,7 @@ class Transformer(tf.keras.Model):
             final = tf.nn.softmax(self.final_layer(dec_output), axis=-1)[:, -1, :]
             return final
         
-        tar = beam_search_decode(num_examples, single_bsd_step, self.out_tok_bos, self.out_tok_eos, self.output_tokenizer.vocab_size(), beam_width=beam_width, max_len=self.max_output_len)
+        tar = self.beam_search_decode(num_examples, single_bsd_step, beam_width=beam_width)
 
         ind = tf.argmax(tf.cast(tf.equal(tar, self.out_tok_eos), tf.float32), axis=1) + 1
         tar_rag = tf.RaggedTensor.from_tensor(tar, lengths=ind)
@@ -576,9 +614,7 @@ class Transformer(tf.keras.Model):
                 break
             out = self.translate_batch([inp])
             out = out[0].decode('utf-8')
-            #attn = attn[-1][1][0]
             print("Predicted sentence: %s" % out)
-            #self.plot_attention_weights(attn, inp, out)
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
