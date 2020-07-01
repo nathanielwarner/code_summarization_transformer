@@ -444,6 +444,9 @@ class Transformer(tf.keras.Model):
 
     def parallel_tokenize(self, code, nl):
         return self.input_tokenizer.tokenize(code), self.output_tokenizer.tokenize(nl)
+    
+    def truncate_oversize_codes(self, code, nl):
+        return code[:self.max_input_len], nl
 
     def filter_max_len(self, code, nl):
         return tf.logical_and(tf.size(code) <= self.max_input_len,
@@ -465,6 +468,9 @@ class Transformer(tf.keras.Model):
 
         train_set = train_set.map(self.parallel_tokenize)
         val_set = val_set.map(self.parallel_tokenize)
+
+        train_set = train_set.map(self.truncate_oversize_codes)
+        val_set = val_set.map(self.truncate_oversize_codes)
 
         train_set = train_set.filter(self.filter_max_len)
         val_set = val_set.filter(self.filter_max_len)
