@@ -383,23 +383,22 @@ class Transformer(tf.keras.Model):
         enc_output = self.encoder(inp, training, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
 
         # dec_output.shape == (batch_size, tar_seq_len, d_model)
-        dec_output, attention_weights = self.decoder(
-            tar, enc_output, training, look_ahead_mask, dec_padding_mask)
+        dec_output = self.decoder(tar, enc_output, training, look_ahead_mask, dec_padding_mask)
 
         final_output = self.final_layer(dec_output)  # (batch_size, tar_seq_len, target_vocab_size)
 
-        return final_output, attention_weights
+        return final_output
 
     def train_step(self, inp, tar_inp, tar_out):
 
         enc_padding_mask, combined_mask, dec_padding_mask = create_masks(inp, tar_inp)
 
         with tf.GradientTape() as tape:
-            predictions, _ = self.call(inp, tar_inp,
-                                       True,
-                                       enc_padding_mask,
-                                       combined_mask,
-                                       dec_padding_mask)
+            predictions = self.call(inp, tar_inp,
+                                    True,
+                                    enc_padding_mask,
+                                    combined_mask,
+                                    dec_padding_mask)
             loss = loss_function(tar_out, predictions)
 
         gradients = tape.gradient(loss, self.trainable_variables)
@@ -416,11 +415,11 @@ class Transformer(tf.keras.Model):
             tar_inp = tar[:, :-1]
             tar_out = tar[:, 1:]
             enc_padding_mask, combined_mask, dec_padding_mask = create_masks(inp, tar_inp)
-            predictions, _ = self.call(inp, tar_inp,
-                                       False,
-                                       enc_padding_mask,
-                                       combined_mask,
-                                       dec_padding_mask)
+            predictions = self.call(inp, tar_inp,
+                                    False,
+                                    enc_padding_mask,
+                                    combined_mask,
+                                    dec_padding_mask)
             loss += loss_function(tar_out, predictions)
             i += 1
             if i % 100 == 0:
