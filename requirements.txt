@@ -1,0 +1,4 @@
+tensorflow==2.*
+tensorflow-text==2.*
+falcon==2.*
+gunicorn~=20.0.4
