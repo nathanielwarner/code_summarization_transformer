@@ -9,8 +9,8 @@ class Summarization:
         self.model = model
 
     def on_post(self, req, resp):
-        if req.params is not None and 'in_code' in req.params:
-            in_code = req.params['in_code']
+        if req.media is not None and 'in_code' in req.media:
+            in_code = req.media['in_code']
             print("Received Input Code: %s" % in_code)
             in_code_tensor = tf.convert_to_tensor([in_code], dtype=tf.string)
             summ = self.model.translate_batch(in_code_tensor)[0].numpy().decode('utf-8')
