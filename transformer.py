@@ -293,7 +293,7 @@ class Decoder(tf.keras.layers.Layer):
         return x
 
 
-class Transformer(tf.keras.Model):
+class Transformer(tf.Module):
     def __init__(self, num_layers=4, d_model=128, dff=512, num_heads=8, dropout_rate=0.1,
                  universal=True, shared_qk=True, inp_dim=80, inp_vocab_size=None, tar_dim=40, tar_vocab_size=None,
                  inp_bos=None, inp_eos=None, tar_bos=None, tar_eos=None, ckpt_path=None):

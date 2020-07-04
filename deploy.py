@@ -2,7 +2,7 @@ import tensorflow as tf
 import argparse
 import os
 
-from transformer import Transformer
+from translation_transformer import TranslationTransformer
 
 
 parser = argparse.ArgumentParser(description="Deploy a Transformer to the SavedModel format")
@@ -19,6 +19,6 @@ output_path = os.path.abspath(args["output_path"])
 code_spm_path = os.path.join(dataset_path, "code_spm.model")
 nl_spm_path = os.path.join(dataset_path, "nl_spm.model")
 
-transformer = Transformer(model_path, code_spm_path, nl_spm_path)
+translation_transformer = TranslationTransformer(model_path, code_spm_path, nl_spm_path)
 
-tf.saved_model.save(transformer, output_path)
+tf.saved_model.save(translation_transformer.model, output_path)
