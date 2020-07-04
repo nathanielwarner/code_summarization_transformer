@@ -1,10 +1,9 @@
-import tensorflow as tf
 import nltk
 import numpy as np
 import argparse
 import tqdm
 import os
-from transformer import Transformer
+from translation_transformer import TranslationTransformer
 
 
 nltk.download('wordnet')
@@ -32,29 +31,29 @@ print_out = args["print_out"]
 code_spm_path = os.path.join(dataset_path, "code_spm.model")
 nl_spm_path = os.path.join(dataset_path, "nl_spm.model")
 
-transformer = Transformer(model_path, code_spm_path, nl_spm_path)
+transformer = TranslationTransformer(model_path, code_spm_path, nl_spm_path)
 
-codes_set = tf.data.TextLineDataset(eval_codes_file)
-nl_set = tf.data.TextLineDataset(eval_nl_file)
-eval_set = tf.data.Dataset.zip((codes_set, nl_set))
-eval_set = eval_set.batch(batch_size)
+codes_set = open(eval_codes_file, mode='r', encoding='utf-8').read().splitlines()
+nl_set = open(eval_nl_file, mode='r', encoding='utf-8').read().splitlines()
+assert len(codes_set) == len(nl_set)
+len_set = len(codes_set)
 
-trues = []
 predicts = []
 meteors = []
-batch_num = 0
-for codes_batch, nl_batch in eval_set:
-    batch_num += 1
-    if print_out or batch_num % 10 == 0:
-        print("Batch %d" % batch_num)
-    size_of_batch = tf.size(codes_batch).numpy()
-    predicts_batch = transformer.translate_batch(codes_batch, beam_width=beam_width)
-    for i in range(size_of_batch):
-        code = codes_batch[i].numpy().decode('utf-8')
-        nl = nl_batch[i].numpy().decode('utf-8')
-        predict = predicts_batch[i].numpy().decode('utf-8')
-
-        trues.append([nl])
+for i in tqdm.trange(len_set):
+    if print_out or i % 10 == 1:
+        print("Batch %d" % (i + 1))
+    if i * batch_size + batch_size < len_set:
+        size_of_batch = batch_size
+    else:
+        size_of_batch = len_set - i
+    codes_batch = codes_set[i * batch_size: i * batch_size + size_of_batch]
+    nl_batch = nl_set[i * batch_size: i * batch_size + size_of_batch]
+    predicts_batch = transformer(codes_batch, beam_width=beam_width)
+    for j in range(size_of_batch):
+        code = codes_batch[j]
+        nl = nl_batch[j]
+        predict = predicts_batch[j]
         predicts.append(predict)
         
         meteor = nltk.translate.meteor_score.meteor_score([nl], predict)
@@ -68,7 +67,7 @@ for codes_batch, nl_batch in eval_set:
 average_meteor = np.mean(meteors)
 print("Average METEOR score: %.4f\n" % average_meteor)
 
-corpus_bleu_4 = nltk.translate.bleu_score.corpus_bleu(trues, predicts, weights=(0.25, 0.25, 0.25, 0.25))
-corpus_bleu_2 = nltk.translate.bleu_score.corpus_bleu(trues, predicts, weights=(0.5, 0.5, 0.0, 0.0))
+corpus_bleu_4 = nltk.translate.bleu_score.corpus_bleu(nl_set, predicts, weights=(0.25, 0.25, 0.25, 0.25))
+corpus_bleu_2 = nltk.translate.bleu_score.corpus_bleu(nl_set, predicts, weights=(0.5, 0.5, 0.0, 0.0))
 print("Corpus BLEU-4 score: %.4f" % corpus_bleu_4)
 print("Corpus BLEU-2 score: %.4f" % corpus_bleu_2)

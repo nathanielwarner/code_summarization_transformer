@@ -1,7 +1,6 @@
 import falcon
 import os
-import tensorflow as tf
-from transformer import Transformer
+from translation_transformer import TranslationTransformer
 
 
 class Summarization:
@@ -12,8 +11,7 @@ class Summarization:
         if req.media is not None and 'in_code' in req.media:
             in_code = req.media['in_code']
             print("Received Input Code: %s" % in_code)
-            in_code_tensor = tf.convert_to_tensor([in_code], dtype=tf.string)
-            summ = self.model.translate_batch(in_code_tensor)[0].numpy().decode('utf-8')
+            summ = self.model([in_code])[0]
             print("Generated Completion: %s\n" % summ)
         else:
             print("Received Invalid Request: %s\n" % req)
@@ -23,13 +21,12 @@ class Summarization:
         }
         
 
-
 def build_server(model_path, dataset_path):
     dataset_path = os.path.abspath(dataset_path)
     code_spm_path = os.path.join(dataset_path, "code_spm.model")
     nl_spm_path = os.path.join(dataset_path, "nl_spm.model")
 
-    transformer = Transformer(model_path, code_spm_path, nl_spm_path)
+    transformer = TranslationTransformer(model_path, code_spm_path, nl_spm_path)
 
     api = falcon.API()
     api.add_route('/summarize', Summarization(transformer))

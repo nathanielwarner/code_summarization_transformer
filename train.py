@@ -1,6 +1,6 @@
 import argparse
 import os
-from transformer import Transformer
+from translation_transformer import TranslationTransformer
 
 
 parser = argparse.ArgumentParser(description="Train a Transformer for code summarization")
@@ -21,5 +21,5 @@ train_nl_path = os.path.join(dataset_path, "train_nl.txt")
 val_codes_path = os.path.join(dataset_path, "val_codes.txt")
 val_nl_path = os.path.join(dataset_path, "val_nl.txt")
 
-model = Transformer(model_path, code_spm_path, nl_spm_path, training=True)
+model = TranslationTransformer(model_path, code_spm_path, nl_spm_path)
 model.train(train_codes_path, train_nl_path, val_codes_path, val_nl_path, num_epochs=num_epochs)

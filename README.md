@@ -18,7 +18,7 @@ I implemented this project using TensorFlow.
 2. Run the training script `train.py`, providing the parameters `num_epochs`, `model_path` (path to the model, which contains a `transformer_description.json` file with necessary attributes), and `dataset_path` (ordinarily `data/leclair_java`)
 
 ## Running Locally
-Try an interactive demo by running `transformer.py` with the arguments `model_path` and `dataset_path`. Of course, you need to have a trained model first.
+Try an interactive demo by running `translation_transformer.py` with the arguments `model_path` and `dataset_path`. Of course, you need to have a trained model first.
 
 ## Issues
 - Need to improve documentation of the `transformer_description.json` file. Should probably switch to a standard solution like `hparams`.
