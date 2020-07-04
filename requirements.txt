@@ -1,8 +1,2 @@
 tensorflow==2.*
-falcon==2.*
-gevent>=1.4
-gunicorn~=20.0.4
 sentencepiece==0.1.91
-tqdm
-numpy
-nltk
