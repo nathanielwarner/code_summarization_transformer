@@ -306,6 +306,7 @@ class Transformer(tf.Module):
         self.out_tok_eos = tar_eos
         self.tar_vocab_size = tar_vocab_size
         self.tar_dim = tar_dim
+        self.inp_dim = inp_dim
 
         self.encoder = Encoder(num_layers, d_model, num_heads, dff,
                                inp_vocab_size, inp_dim, rate=dropout_rate,
@@ -442,7 +443,8 @@ class Transformer(tf.Module):
 
     @tf.function
     def translate_batch(self, encoder_inputs, beam_width=10):
-        num_examples = tf.shape(encoder_inputs)[0]
+        num_examples = encoder_inputs.get_shape()[0]
+        encoder_inputs.set_shape((num_examples, self.inp_dim))
 
         enc_padding_mask = create_padding_mask(encoder_inputs)
         enc_outputs = self.encoder(encoder_inputs, False, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
@@ -458,6 +460,7 @@ class Transformer(tf.Module):
         
         tar = beam_search_decode(num_examples, single_bsd_step, self.tar_dim, self.tar_bos, self.tar_eos,
                                  self.tar_vocab_size, beam_width=beam_width)
+        tar.set_shape((num_examples, self.tar_dim))
         return tar
 
 

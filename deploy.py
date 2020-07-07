@@ -22,7 +22,7 @@ nl_spm_path = os.path.join(dataset_path, "nl_spm.model")
 translation_transformer = TranslationTransformer(model_path, code_spm_path, nl_spm_path)
 
 call = translation_transformer.model.translate_batch.get_concrete_function(
-    tf.TensorSpec((None, translation_transformer.inp_dim), dtype=tf.int32)
+    tf.TensorSpec((1, translation_transformer.inp_dim), dtype=tf.int32)
 )
 
 tf.saved_model.save(translation_transformer.model, output_path, signatures=call)
