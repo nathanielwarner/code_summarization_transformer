@@ -30,7 +30,7 @@ def beam_search_decode(size_of_batch, single_bsd_step, tar_dim, tar_bos, tar_eos
     finished_beams_excl = tf.fill((size_of_batch, beam_width, tar_vocab_size - 1), False)
 
     first_iteration = True
-    for step in tf.range(0, limit=tar_dim, delta=1):
+    for step in tf.range(0, limit=tar_dim - 1, delta=1):
 
         end_tokens = tf.equal(beam_preds, tar_eos)
         already_finished_beams = tf.reduce_any(end_tokens, axis=-1)

@@ -28,7 +28,7 @@ class ProdTranslator:
                                                                 padding='post', truncating='post')
         self.interpreter.set_tensor(self.input_details[0]['index'], inp_pad)
         self.interpreter.invoke()
-        out = self.interpreter.get_tensor(self.output_details[0]['index'])
+        out = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
         end = tf.argmax(tf.cast(tf.equal(out, self.tar_tokenizer.eos_id()), tf.float32), axis=0).numpy() + 1
         out_detok = self.tar_tokenizer.DecodeIds(out[:end].tolist())
         return out_detok
@@ -59,7 +59,7 @@ def main():
         inp = input(">> ")
         if inp == "exit" or inp == "quit":
             break
-        out = translator(inp)[0]
+        out = translator(inp)
         print("Predicted sentence: %s" % out)
 
 

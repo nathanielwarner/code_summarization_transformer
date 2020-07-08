@@ -22,7 +22,7 @@ I implemented this project using TensorFlow.
 ## Running Locally
 If you trained a model yourself, you can run an interactive demo by running `translation_transformer.py` with the arguments `model_path` and `dataset_path`.
 
-There is a pretrained SavedModel in `models/java_summ_ut_prod1`, which you can run using [TensorFlow Serving](https://www.tensorflow.org/tfx/tutorials/serving/rest_simple#start_running_tensorflow_serving). You can also make use of this model by instantiating a `ProdTranslationServer` (defined [here](https://github.com/nathanielwarner/code_summarization_transformer/blob/master/main.py)).
+There is a pretrained model in the TFLite format at `models/java_summ_ut_4.tflite`, which you can try by running `main.py`. You currently need TensorFlow Nightly (`tf-nightly`), because support for all the necessary operations has not been released in the stable version. Currently only Linux is supported.
 
 ## Issues
 - Need to improve documentation of the `transformer_description.json` file. Should probably switch to a standard solution like `hparams`.
