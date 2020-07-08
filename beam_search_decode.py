@@ -18,37 +18,29 @@ def beam_search_decode(size_of_batch, single_bsd_step, tar_dim, tar_bos, tar_eos
     :return:
     """
 
-    beam_preds = tf.TensorArray(tf.int32, size=0, dynamic_size=True, clear_after_read=True, infer_shape=False)
-    beam_preds = beam_preds.write(0, tf.repeat(tf.expand_dims(tf.repeat(
-        tf.expand_dims(tf.expand_dims(tar_bos, 0), 0), beam_width, axis=0
-    ), 0), size_of_batch, axis=0))
+    beam_preds = tf.repeat(tf.expand_dims(tf.repeat(
+        tf.expand_dims(tf.repeat(tf.expand_dims(tar_bos, 0), tar_dim), 0), beam_width, axis=0
+    ), 0), size_of_batch, axis=0)
+    beam_preds.set_shape((size_of_batch, beam_width, tar_dim))
 
-    beam_perps = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=True, infer_shape=True)
-    beam_perps = beam_perps.write(0, tf.repeat(tf.expand_dims(tf.repeat(tf.expand_dims(0.0, 0), beam_width, axis=0), 0),
-                                               size_of_batch, axis=0))
+    beam_perps = tf.repeat(tf.expand_dims(tf.repeat(tf.expand_dims(0.0, 0), beam_width, axis=0), 0),
+                           size_of_batch, axis=0)
+    beam_perps.set_shape((size_of_batch, beam_width))
 
     finished_beams_excl = tf.fill((size_of_batch, beam_width, tar_vocab_size - 1), False)
 
     first_iteration = True
     for step in tf.range(0, limit=tar_dim, delta=1):
 
-        cur_beam_preds = beam_preds.read(0)
-        cur_beam_perps = beam_perps.read(0)
-
-        end_tokens = tf.equal(cur_beam_preds, tar_eos)
+        end_tokens = tf.equal(beam_preds, tar_eos)
         already_finished_beams = tf.reduce_any(end_tokens, axis=-1)
-        if tf.reduce_all(already_finished_beams):
-            beam_preds = beam_preds.write(0, cur_beam_preds)
-            break
 
-        flat_beam_preds = tf.reshape(cur_beam_preds, (size_of_batch * beam_width, -1))
-        flat_beam_preds_padded = tf.pad(flat_beam_preds, tf.convert_to_tensor(((0, 0), (0, tar_dim - step - 1))),
-                                        mode="CONSTANT", constant_values=0)
-        flat_pred_probs_pre = single_bsd_step(flat_beam_preds_padded)
+        flat_beam_preds = tf.reshape(beam_preds, (size_of_batch * beam_width, tar_dim))
+        flat_pred_probs_pre = single_bsd_step(flat_beam_preds)
         flat_pred_probs = flat_pred_probs_pre[:, step, :]
-        pred_probs = tf.reshape(flat_pred_probs, (size_of_batch, beam_width, -1))
+        pred_probs = tf.reshape(flat_pred_probs, (size_of_batch, beam_width, tar_vocab_size))
 
-        expanded_old_perps = tf.repeat(tf.expand_dims(cur_beam_perps, -1), tar_vocab_size, axis=-1)
+        expanded_old_perps = tf.repeat(tf.expand_dims(beam_perps, -1), tar_vocab_size, axis=-1)
 
         finished_beams_broadcast_with_excl = tf.concat((tf.expand_dims(already_finished_beams, 2), finished_beams_excl),
                                                        2)
@@ -67,15 +59,17 @@ def beam_search_decode(size_of_batch, single_bsd_step, tar_dim, tar_bos, tar_eos
         flattened_pred_perps = tf.reshape(pred_perps, (size_of_batch, new_beam_width * tar_vocab_size))
         values, indices = tf.math.top_k(-flattened_pred_perps, k=beam_width, sorted=True)
 
-        true_perps = -values
-        beam_perps = beam_perps.write(0, true_perps)
+        beam_perps = -values
+        beam_perps.set_shape((size_of_batch, beam_width))
         first_iteration = False
 
         beam_indices = tf.math.floordiv(indices, tar_vocab_size)
-        chosen_beam_preds = tf.gather(cur_beam_preds, beam_indices, axis=1, batch_dims=1)
+        chosen_beam_preds = tf.gather(beam_preds[:, :, :step + 1], beam_indices, axis=1, batch_dims=1)
         token_indices = tf.expand_dims(indices - beam_indices * tar_vocab_size, 2)
-        new_full_beam_preds = tf.concat((chosen_beam_preds, token_indices), -1)
-        beam_preds = beam_preds.write(0, new_full_beam_preds)
+        new_beam_preds = tf.concat((chosen_beam_preds, token_indices), -1)
+        beam_preds = tf.pad(new_beam_preds, tf.convert_to_tensor(((0, 0), (0, 0), (0, tar_dim - step - 2))),
+                            mode="CONSTANT", constant_values=0)
+        beam_preds.set_shape((size_of_batch, beam_width, tar_dim))
 
-    best_beam_preds = beam_preds.read(0)[:, 0, :]
+    best_beam_preds = beam_preds[:, 0, :]
     return best_beam_preds
