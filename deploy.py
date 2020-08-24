@@ -5,7 +5,7 @@ import os
 from translation_transformer import TranslationTransformer
 
 
-parser = argparse.ArgumentParser(description="Deploy a Transformer to the SavedModel format")
+parser = argparse.ArgumentParser(description="Deploy a Transformer to the TFLite format")
 parser.add_argument("--model_path", help="Path to the Transformer model", required=True)
 parser.add_argument("--dataset_path", help="Path to dataset, containing the SentencePiece"
                                            "models.", required=True, type=str)

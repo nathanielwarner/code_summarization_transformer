@@ -1,0 +1,41 @@
+apiVersion: apps/v1         # Deployment
+kind: Deployment
+metadata:
+  name: summarization-server
+  labels:
+    app: summarization
+spec:
+  replicas: 1               # ReplicaSet
+  selector:
+    matchLabels:
+      app: summarization
+  template:
+    metadata:               # Pod
+      labels:
+        app: summarization
+    spec:
+      containers:
+      - name: summarization-server-container
+        image: nathaniel515/code_summarization_transformer:1.0
+        ports:
+        - name: summ-port
+          containerPort: 8001
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "0.1"
+        startupProbe:
+          tcpSocket:
+            port: summ-port
+          failureThreshold: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: summ-port
+          failureThreshold: 1
+          periodSeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: summ-port
+          failureThreshold: 1
+          periodSeconds: 15
