@@ -24,10 +24,10 @@ spec:
         resources:
           requests:
             memory: "500Mi"
-            cpu: "250m"
+            cpu: "925m"
           limits:
             memory: "1000Mi"
-            cpu: "750m"
+            cpu: "1250m"
         startupProbe:
           tcpSocket:
             port: summ-port
