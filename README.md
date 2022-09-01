@@ -2,8 +2,6 @@
 Automatic summarization of source code using a neural network,
 based on the Universal Transformer architecture.
 
-Check out the [live demo](https://nathanielwarner.net/projects/code-completion-demo)!
-
 ## Details
 The Transformer architecture for sequence-to-sequence modeling is comprised of an Encoder and a Decoder.
 The Encoder and Decoder have sets of layers, each of which has a self-attention block and a feed-forward block. 
